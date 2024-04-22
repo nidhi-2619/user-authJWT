@@ -6,7 +6,9 @@ import jwt from 'jsonwebtoken';
 import express from 'express';
 import dotenv from 'dotenv';
 import readLastLines from 'read-last-lines';
-// import fetch from 'node-fetch';
+import fetch from 'node-fetch';
+import { log } from 'console';
+import { reverse } from 'dns';
 
 dotenv.config({ path: './.env' });
 
@@ -21,7 +23,7 @@ function generateAccessToken(user) {
     }
     const secret = process.env.JWT_SECRET;
     const options = {
-        expiresIn: '1h',
+        expiresIn: '10h',
     }
     return jwt.sign(payload, secret, options);
 }
@@ -36,48 +38,91 @@ function verifyAccessToken(token) {
     }
 }
 
-async function checkWebsiteStatus(website, userData){
-
+async function checkWebsiteStatus(website){
     const result = await fetch(website)// Using fetch with the provided website URL
         .then(response => {
-            // console.log(response)
-            return response})
-        .then(response => {
-            // console.log(typeof(response))
             if (response['status'] === 200) {
-                fs.appendFile(`${userData.email}.log.csv`,`${website} is up at ${new Date()}\n`, (err) => {
-                    if (err) {
-                        console.log(err);
-                    } 
-                    });
-                    return  `${website} is up at ${new Date()}`;
-                     
+                    // return  `${website} is up at ${new Date()}`;
+                    return ({
+                        "status": "UP",
+                        "time": new Date().toLocaleString()
+                    })
                 
             } else {
-                fs.appendFile(`${userData.email}.log.csv`, `${website} is down at ${new Date()}\n`, (err) => {
-                    if (err) {
-                        console.log(err);
-                    } 
-                });
-                return `${website} is down at ${new Date()}`;
-            
+                // return `${website} is down at ${new Date()}`;
+                return ({
+                    "status": "DOWN",
+                    "time": new Date().toLocaleString()
+                })
             }
         })
-        .then((result)=>{
-            const checkedWebsite = new URL(website)
-            // console.log(checkedWebsite)
-            fs.appendFile(`${checkedWebsite.hostname}.csv`, `${result}\n`,(err) => {
-                if (err) {
-                    console.log(err);
-                } 
-                });
-        })
+        .then(res=>{
+           
+            if (fs.existsSync('checkedwebsite.json') === false)
+                fs.writeFileSync('checkedwebsite.json', JSON.stringify({}));
+            const websiteStatus = fs.readFileSync('checkedwebsite.json', 'utf8');
+            let data = JSON.parse(websiteStatus);
+            if (!data[website]) data[website] = [res];
+            else data[website].push(res)
+            fs.writeFileSync('checkedwebsite.json', JSON.stringify(data));
+        
+})
         .catch(err => err);
-
-    return result;
+    
+    return result
 
     }
 
+
+
+setInterval( ()=>{
+    const userSearchedWebsites = fs.readFileSync('users.json', 'utf8');
+    const userHistory = JSON.parse(userSearchedWebsites);
+    // console.log(userHistory)
+    console.log('Checking website status')
+    for (const user in userHistory) {
+        if (!userHistory[user].hasOwnProperty('websites')){
+            continue;
+        }
+        const websites = userHistory[user].websites;
+        for (const website of websites) {
+
+        fetch(website)// Using fetch with the provided website URL
+        .then(response => {
+            if (response.status === 200) {
+                    return ({
+                        "status": "UP",
+                        "time": new Date().toLocaleString()
+                    })
+                    
+                
+            } else {
+                return ({
+                    "status": "DOWN",
+                    "time": new Date().toLocaleString()
+                })
+            
+            }
+        }) 
+        .then((result)=>{
+            if (fs.existsSync('checkedwebsite.json') === false)
+                fs.writeFile('checkedwebsite.json', JSON.stringify({}));
+            const websiteStatus = fs.readFileSync('checkedwebsite.json', 'utf8');
+            let data = JSON.parse(websiteStatus);
+            console.log(data)
+            if (!data[website]) data[website] = [result];
+            else data[website].push(result)
+            fs.writeFileSync('checkedwebsite.json', JSON.stringify(data));
+        
+        })
+        .catch(err => err);
+    }
+}
+
+},1000*60*30);
+
+
+  
 
 function verifyUser(req, res, next) {
     const bearerHeader = req.headers['authorization'];
@@ -138,33 +183,31 @@ app.post('/login', (req, res) => {
 
 
 
-app.post('/check', verifyUser, (req, res) => {
+app.post('/check', verifyUser,(req, res) => {
     jwt.verify(req.token, process.env.JWT_SECRET, (err, userData) => {
         if (err) {
             res.status(401).json('You are not authorized');
         } else {
                 const { website } = req.body; // Extracting website from request body
-                const task = cron.schedule('*/5 * * * * *',()=>{
-                    checkWebsiteStatus(website, userData);
-                } );
-                task.start();
-                if (fs.existsSync(`${new URL(website).hostname}.csv`)){
-                    return res.json("Website Status has been updated please check on /logs endpoint")
-                }
+               
                 const userInfo = fs.readFileSync('users.json', 'utf8');
                 const data = JSON.parse(userInfo);
-                if (!data[userData.email]['website'].includes(website)) {
-                    data[userData.email]['website'].push(website);
+                if (!data[userData.email].hasOwnProperty('websites')) {
+                    data[userData.email]['websites'] = [];
+                }
+
+                if (!data[userData.email]['websites'].includes(website)) {
+                    data[userData.email]['websites'].push(website);
                     fs.writeFileSync('users.json', JSON.stringify(data));
                 }
-                   
                 
-                const result = checkWebsiteStatus(website, userData);
+                const result = checkWebsiteStatus(website);
                 if (result === undefined) {
                     return res.status(500).json('Failed to check website status');
                 }
                 else{
-                    res.json("Website status checked successfully .Check Status at endpoint /logs");
+                res.json("Website status checked successfully .Check Status at endpoint /logs");
+                // res.end();
                 }
  // Sending the status message to the client
         }
@@ -176,17 +219,30 @@ app.get('/logs', verifyUser, (req, res) => {
         if (err) {
             res.status(401).json('You are not authorized');
         } else {
-            fs.readFile(`${userData.email}.log.csv`, 'utf8', (err, data) => {
-                if (err) {
-                    return res.status(404).json('Logs not found');
-                }
-                const result = data.split('\n');
-                res.json({
-                    "recent_logs": result.slice(-2),
-                    "logs": result
+            const readUser = fs.readFileSync('users.json', 'utf8');
+            const dataUser = JSON.parse(readUser);
+            //now fetch the websites from it
+            if (dataUser[userData.email]['websites'].length === 0) {
+                return res.status(404).json('No website to check');
+            }
+            const logs = []
+            for (const website of dataUser[userData.email]['websites']) {
+                const websiteStatus = fs.readFileSync('checkedwebsite.json', 'utf8');
+                const data = JSON.parse(websiteStatus);
 
-                });
+                logs.push({
+                    "website": website,
+                    "logs": data.hasOwnProperty(website)?data[website].slice(-1):"no logs found"
+                })
+            }
+            res.json({
+
+                "recent logs": logs
             });
+
+
+
+
         }
     });
 });

@@ -2,6 +2,8 @@
 export default {
   content: [
     'index.html',
+    'login.html',
+    'signup.html'
   ],
   theme: {
     extend: {},
