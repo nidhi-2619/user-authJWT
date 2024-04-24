@@ -39,9 +39,9 @@ function verifyAccessToken(token) {
 }
 
 async function checkWebsiteStatus(website){
-    const result = await fetch(website)// Using fetch with the provided website URL
+    const result = await fetch(website,{method:'HEAD'})// Using fetch with the provided website URL
         .then(response => {
-            if (response['status'] === 200) {
+            if (response.status === 200) {
                     // return  `${website} is up at ${new Date()}`;
                     return ({
                         "status": "UP",
@@ -58,13 +58,13 @@ async function checkWebsiteStatus(website){
         })
         .then(res=>{
            
-            if (fs.existsSync('checkedwebsite.json') === false)
-                fs.writeFileSync('checkedwebsite.json', JSON.stringify({}));
-            const websiteStatus = fs.readFileSync('checkedwebsite.json', 'utf8');
+            if (fs.existsSync('websiteStatus.json') === false)
+                fs.writeFileSync('websiteStatus.json', JSON.stringify({}));
+            const websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
             let data = JSON.parse(websiteStatus);
             if (!data[website]) data[website] = [res];
             else data[website].push(res)
-            fs.writeFileSync('checkedwebsite.json', JSON.stringify(data));
+            fs.writeFileSync('websiteStatus.json', JSON.stringify(data));
         
 })
         .catch(err => err);
@@ -72,8 +72,6 @@ async function checkWebsiteStatus(website){
     return result
 
     }
-
-
 
 setInterval( ()=>{
     const userSearchedWebsites = fs.readFileSync('users.json', 'utf8');
@@ -86,42 +84,46 @@ setInterval( ()=>{
         }
         const websites = userHistory[user].websites;
         for (const website of websites) {
-
-        fetch(website)// Using fetch with the provided website URL
-        .then(response => {
-            if (response.status === 200) {
-                    return ({
-                        "status": "UP",
-                        "time": new Date().toLocaleString()
-                    })
-                    
-                
-            } else {
-                return ({
-                    "status": "DOWN",
+        Promise.allSettled(websites.map(website=>fetch(website,{method:'HEAD'})))
+        .then((promises) =>promises.forEach(response =>{
+            console.log(response.value.status)
+            if (response.value.status === 200) {
+                const result = {
+                    "status": "UP",
                     "time": new Date().toLocaleString()
-                })
-            
-            }
-        }) 
-        .then((result)=>{
-            if (fs.existsSync('checkedwebsite.json') === false)
-                fs.writeFile('checkedwebsite.json', JSON.stringify({}));
-            const websiteStatus = fs.readFileSync('checkedwebsite.json', 'utf8');
-            let data = JSON.parse(websiteStatus);
-            console.log(data)
-            if (!data[website]) data[website] = [result];
-            else data[website].push(result)
-            fs.writeFileSync('checkedwebsite.json', JSON.stringify(data));
+                }
+                if (fs.existsSync('websiteStatus.json') === false)
+                fs.writeFileSync('websiteStatus.json', JSON.stringify({}));
+                const websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
+                let data = JSON.parse(websiteStatus);
+                if (!data[website]) data[website] = [result];
+                else data[website].push(result)
+                fs.writeFileSync('websiteStatus.json', JSON.stringify(data));
+                
+            }  else {
+                const result = {
+                        "status": "DOWN",
+                        "time": new Date().toLocaleString()
+                    }
+
+
+                if (fs.existsSync('websiteStatus.json') === false)
+                    fs.writeFileSync('websiteStatus.json', JSON.stringify({}));
+                const websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
+                let data = JSON.parse(websiteStatus);
+                if (!data[website]) data[website] = [result];
+                else data[website].push(result)
+                fs.writeFileSync('websiteStatus.json', JSON.stringify(data));    
+                
+                }    
+                
         
-        })
+            
+        }))
         .catch(err => err);
     }
 }
-
-},1000*60*30);
-
-
+},5000)
   
 
 function verifyUser(req, res, next) {
@@ -227,7 +229,7 @@ app.get('/logs', verifyUser, (req, res) => {
             }
             const logs = []
             for (const website of dataUser[userData.email]['websites']) {
-                const websiteStatus = fs.readFileSync('checkedwebsite.json', 'utf8');
+                const websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
                 const data = JSON.parse(websiteStatus);
 
                 logs.push({
@@ -235,10 +237,17 @@ app.get('/logs', verifyUser, (req, res) => {
                     "logs": data.hasOwnProperty(website)?data[website].slice(-1):"no logs found"
                 })
             }
-            res.json({
+            if (req.query.website){
+                res.json({
+                    "recent logs":logs.filter(log=>log.website===req.query.website)
+                })
+            }
+            else{
+                res.json({
 
                 "recent logs": logs
             });
+        }
 
 
 
