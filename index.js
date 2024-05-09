@@ -1,19 +1,17 @@
-
-import cron from 'node-cron';
-import http from 'http';
-import fs from 'fs';
+import fs, { existsSync } from 'fs';
 import jwt from 'jsonwebtoken';
 import express from 'express';
 import dotenv from 'dotenv';
-import readLastLines from 'read-last-lines';
 import fetch from 'node-fetch';
-import { log } from 'console';
-import { reverse } from 'dns';
+import zlib from 'zlib';
+import path, { basename } from 'path';
 
 dotenv.config({ path: './.env' });
 
 const app = express();
 app.use(express.json());
+app.use(express.static('ZippedLogs'))
+
 
 function generateAccessToken(user) {
     const payload = {
@@ -28,28 +26,47 @@ function generateAccessToken(user) {
     return jwt.sign(payload, secret, options);
 }
 
-function verifyAccessToken(token) {
-    const secret = process.env.JWT_SECRET;
-    try {
-        const decoded = jwt.verify(token, secret);
-        return { success: true, data: decoded };
-    } catch (error) {
-        return { success: false, error: error.message };
+// in memory read and write
+let userSearchedWebsites = ''
+try{
+    userSearchedWebsites = fs.readFileSync('users.json', 'utf8'); 
+}
+catch(error){
+    if (error.code==='ENOENT'){
+        userSearchedWebsites =fs.writeFileSync('users.json', JSON.stringify({}))
+
+    }else{
+        process.exit()
     }
 }
+
+let websiteStatus = '';
+try{
+    websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
+}
+catch(error){
+    if (error.code==='ENOENT'){
+        websiteStatus=fs.writeFileSync('websiteStatus.json',JSON.stringify({}))
+        websiteStatus='{}'
+    }else{
+        process.exit()
+    }
+}
+
+
 
 async function checkWebsiteStatus(website){
     const result = await fetch(website,{method:'HEAD'})// Using fetch with the provided website URL
         .then(response => {
             if (response.status === 200) {
-                    // return  `${website} is up at ${new Date()}`;
+                   
                     return ({
                         "status": "UP",
                         "time": new Date().toLocaleString()
                     })
                 
             } else {
-                // return `${website} is down at ${new Date()}`;
+               
                 return ({
                     "status": "DOWN",
                     "time": new Date().toLocaleString()
@@ -58,9 +75,7 @@ async function checkWebsiteStatus(website){
         })
         .then(res=>{
            
-            if (fs.existsSync('websiteStatus.json') === false)
-                fs.writeFileSync('websiteStatus.json', JSON.stringify({}));
-            const websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
+            
             let data = JSON.parse(websiteStatus);
             if (!data[website]) data[website] = [res];
             else data[website].push(res)
@@ -73,10 +88,10 @@ async function checkWebsiteStatus(website){
 
     }
 
-setInterval( ()=>{
-    const userSearchedWebsites = fs.readFileSync('users.json', 'utf8');
+setInterval(()=>{
+    let data = JSON.parse(websiteStatus)
+
     const userHistory = JSON.parse(userSearchedWebsites);
-    // console.log(userHistory)
     console.log('Checking website status')
     for (const user in userHistory) {
         if (!userHistory[user].hasOwnProperty('websites')){
@@ -86,45 +101,87 @@ setInterval( ()=>{
         for (const website of websites) {
         Promise.allSettled(websites.map(website=>fetch(website,{method:'HEAD'})))
         .then((promises) =>promises.forEach(response =>{
-            console.log(response.value.status)
             if (response.value.status === 200) {
                 const result = {
                     "status": "UP",
                     "time": new Date().toLocaleString()
                 }
-                if (fs.existsSync('websiteStatus.json') === false)
-                fs.writeFileSync('websiteStatus.json', JSON.stringify({}));
-                const websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
-                let data = JSON.parse(websiteStatus);
-                if (!data[website]) data[website] = [result];
-                else data[website].push(result)
-                fs.writeFileSync('websiteStatus.json', JSON.stringify(data));
+                
+                if (response.value.url===website){
+                    if (!data[website]) data[website] = [result];
+                    else data[website].push(result)
+                }
+                websiteStatus = JSON.stringify(data)
                 
             }  else {
                 const result = {
                         "status": "DOWN",
                         "time": new Date().toLocaleString()
                     }
-
-
-                if (fs.existsSync('websiteStatus.json') === false)
-                    fs.writeFileSync('websiteStatus.json', JSON.stringify({}));
-                const websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
-                let data = JSON.parse(websiteStatus);
-                if (!data[website]) data[website] = [result];
-                else data[website].push(result)
-                fs.writeFileSync('websiteStatus.json', JSON.stringify(data));    
                 
-                }    
-                
-        
+                    if (!data[website]) data[website] = [result];
+                    else data[website].push(result)
+                    websiteStatus = JSON.stringify(data)
+                }  
+       
             
         }))
         .catch(err => err);
+             
+
     }
+    
 }
-},5000)
-  
+fs.writeFileSync('websiteStatus.json', websiteStatus)
+},1000*5)
+
+let baseDir = path.join('/home/user/Desktop/httpserver/ZippedLogs')
+
+if (!fs.existsSync(baseDir)){
+        fs.mkdirSync(baseDir)
+    }
+
+async function createZip(){
+    return new Promise((resolve, reject) => {
+        console.log("Creating zip");
+        const readStream = fs.createReadStream('websiteStatus.json');
+        const writeStream = fs.createWriteStream(`${baseDir}/${Date.now()}.gz`);
+        const gzip = zlib.createGzip();
+        readStream.pipe(gzip).pipe(writeStream);
+        writeStream.on('close', () => {
+            console.log("Zip created");
+            resolve();
+        });
+        writeStream.on('error', (err) => {
+            reject(err);
+        });
+    });
+}
+setInterval( async ()=>{
+    await createZip()
+    websiteStatus = '{}'
+    fs.writeFileSync('websiteStatus.json', websiteStatus);
+    console.log("websiteStatus.json cleared");
+   },1000*10)
+
+
+
+// process.on('uncaughtException',(err,origin)=>{
+//     fs.writeSync(
+//         process.stderr.fd,
+//         `Caught exception: ${err}\n` +
+//         `Exception origin: ${origin}\n`,
+//       );
+   
+//             fs.writeFileSync('websiteStatus.json', websiteStatus)
+//     process.exit()
+   
+// }) 
+process.on('SIGINT',()=>{
+    fs.writeFileSync('websiteStatus.json', websiteStatus)
+    process.exit()
+})
+
 
 function verifyUser(req, res, next) {
     const bearerHeader = req.headers['authorization'];
@@ -162,6 +219,8 @@ app.post('/register', (req, res) => {
         });
     });
 });
+
+
 
 app.post('/login', (req, res) => {
     const user = req.body;
@@ -255,6 +314,43 @@ app.get('/logs', verifyUser, (req, res) => {
         }
     });
 });
+
+
+app.get('/downloadzip',(req,res)=>{
+//     jwt.verify(req.token, process.env.JWT_SECRET, (err, userData) => {
+        // if (err) {
+            // res.status(401).json('You are not authorized');
+        // } else {
+            if(req.query.zipfile && fs.existsSync(path.join(baseDir,req.query.zipfile))){
+                // res.download(baseDir+req.query.zipfile)
+                // res.setHeader(
+                //     'Content-Disposition', `attachment; filename=${req.query.zipfile}`);
+                res.download(`${path.join(baseDir,req.query.zipfile)}`,'LogZip.zip');
+                
+               
+            }
+            else if(!req.query.zipfile){
+                fs.readdir(baseDir, (err, files) => {
+                    if (err) {
+                        return res.status(500).send('Error reading folder');
+                    }
+            
+                    const downloadLinks = files.map(file => {
+                        return `${req.protocol}://${req.get('host')}/logs/${encodeURIComponent(file)}`;
+                    });
+            
+                    res.json(downloadLinks);
+                });
+            }
+            else{
+                res.status(404).json('File not found')
+            }
+           
+        // }
+    // })
+})
+
+
 
 
 
