@@ -5,19 +5,37 @@ import dotenv from 'dotenv';
 import fetch from 'node-fetch';
 import zlib from 'zlib';
 import path, { basename } from 'path';
-
+import { MongoClient } from 'mongodb';
 dotenv.config({ path: './.env' });
 
 const app = express();
 app.use(express.json());
 app.use(express.static('ZippedLogs'))
 
+const mongo = new MongoClient(`${process.env.MONGO_URI}`)
+const db = mongo.db(process.env.DB_NAME)
+const userCollection = db.collection("users")
+const websiteStatus = db.collection("websitestatus")
 
-function generateAccessToken(user) {
+const DB_CONNECTION = async()=>{
+
+    try{
+    await mongo.connect()
+    console.log("Connected to database")
+    }
+    catch(error){
+    console.log("MongoDB connection error.", error)
+    process.exit()
+    
+    }
+}
+
+
+
+function generateAccessToken(username, email) {
     const payload = {
-        username: user.username,
-        email: user.email,
-        password: user.password,
+        username: username,
+        email: email,
     }
     const secret = process.env.JWT_SECRET;
     const options = {
@@ -26,37 +44,11 @@ function generateAccessToken(user) {
     return jwt.sign(payload, secret, options);
 }
 
-// in memory read and write
-let userSearchedWebsites = ''
-try{
-    userSearchedWebsites = fs.readFileSync('users.json', 'utf8'); 
-}
-catch(error){
-    if (error.code==='ENOENT'){
-        userSearchedWebsites =fs.writeFileSync('users.json', JSON.stringify({}))
-
-    }else{
-        process.exit()
-    }
-}
-
-let websiteStatus = '';
-try{
-    websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
-}
-catch(error){
-    if (error.code==='ENOENT'){
-        websiteStatus=fs.writeFileSync('websiteStatus.json',JSON.stringify({}))
-        websiteStatus='{}'
-    }else{
-        process.exit()
-    }
-}
-
 
 
 async function checkWebsiteStatus(website){
-    const result = await fetch(website,{method:'HEAD'})// Using fetch with the provided website URL
+    let user;
+    await fetch(website,{method:'HEAD'})// Using fetch with the provided website URL
         .then(response => {
             if (response.status === 200) {
                    
@@ -73,67 +65,99 @@ async function checkWebsiteStatus(website){
                 })
             }
         })
-        .then(res=>{
-           
+        .then(async (status)=>{  
+            if(!await websiteStatus.findOne({website})){
+                 user = await websiteStatus.insertOne({
+                        website:website,
+                        status:[status]
+                    })
+                
+            }
+            else{
+                 user = await websiteStatus.findOneAndUpdate(
+                    {website},{
+                        $push:{
+                            status:status
+                        }
+                    }
+                )
+                
+            }
             
-            let data = JSON.parse(websiteStatus);
-            if (!data[website]) data[website] = [res];
-            else data[website].push(res)
-            fs.writeFileSync('websiteStatus.json', JSON.stringify(data));
         
 })
         .catch(err => err);
     
-    return result
+    
+    const log = await websiteStatus.findOne({website})
+    return log
 
     }
 
-setInterval(()=>{
-    let data = JSON.parse(websiteStatus)
+let websiteLogs = {}
+// console.log(websiteStatus.deleteMany({document:null}))
+// let  userSearchedWebsites =  await websiteStatus.find()
 
-    const userHistory = JSON.parse(userSearchedWebsites);
-    console.log('Checking website status')
-    for (const user in userHistory) {
-        if (!userHistory[user].hasOwnProperty('websites')){
-            continue;
-        }
-        const websites = userHistory[user].websites;
-        for (const website of websites) {
-        Promise.allSettled(websites.map(website=>fetch(website,{method:'HEAD'})))
-        .then((promises) =>promises.forEach(response =>{
-            if (response.value.status === 200) {
-                const result = {
+setInterval(async()=>{
+    console.log("checking website")
+    await websiteStatus.find().forEach((websiteData)=>{
+        // console.log(websiteData)
+        fetch(websiteData['website'])
+        .then((response)=>{
+            let result = {}
+            if (response.status === 200) {
+                result = {
                     "status": "UP",
                     "time": new Date().toLocaleString()
                 }
-                
-                if (response.value.url===website){
-                    if (!data[website]) data[website] = [result];
-                    else data[website].push(result)
+            }
+            else{
+                result = {
+                    "status": "DOWN",
+                    "time": new Date().toLocaleString()
                 }
-                websiteStatus = JSON.stringify(data)
-                
-            }  else {
-                const result = {
-                        "status": "DOWN",
-                        "time": new Date().toLocaleString()
-                    }
-                
-                    if (!data[website]) data[website] = [result];
-                    else data[website].push(result)
-                    websiteStatus = JSON.stringify(data)
-                }  
-       
+            }    
             
-        }))
-        .catch(err => err);
-             
+            return result
+           
+        })
+        .then((status)=>{
+            // console.log("STATUS:", status)
+            if (!websiteLogs[websiteData['website']]){
+                websiteLogs[websiteData['website']]=[status]
+            }
+            websiteLogs[websiteData['website']].push(status)
+            
+            // console.log("WEBSITELOGS : ", websiteLogs)
+           
+        })
+        .catch((err)=>console.log(err))
+        
+    })
+},1000*5)
 
+setInterval(async()=>{
+
+    for (const website in websiteLogs){
+        const logs = websiteLogs[website]
+              
+        await websiteStatus.findOneAndUpdate(
+            {website},
+            {
+                $push:{
+                    status:{
+                        $each:logs
+                    }
+                }
+            }
+        )
     }
     
-}
-fs.writeFileSync('websiteStatus.json', websiteStatus)
-},1000*5)
+    
+    
+},1000*10)
+
+
 
 let baseDir = path.join('/home/user/Desktop/httpserver/ZippedLogs')
 
@@ -141,10 +165,11 @@ if (!fs.existsSync(baseDir)){
         fs.mkdirSync(baseDir)
     }
 
-async function createZip(){
-    return new Promise((resolve, reject) => {
+async function createZip(logs){
+    return new Promise(async (resolve, reject) => {
         console.log("Creating zip");
-        const readStream = fs.createReadStream('websiteStatus.json');
+        const LOGS = logs.toJSON()
+        const readStream = fs.createReadStream('LOGS');
         const writeStream = fs.createWriteStream(`${baseDir}/${Date.now()}.gz`);
         const gzip = zlib.createGzip();
         readStream.pipe(gzip).pipe(writeStream);
@@ -157,12 +182,12 @@ async function createZip(){
         });
     });
 }
-setInterval( async ()=>{
-    await createZip()
-    websiteStatus = '{}'
-    fs.writeFileSync('websiteStatus.json', websiteStatus);
-    console.log("websiteStatus.json cleared");
-   },1000*10)
+// setInterval( async ()=>{
+//     await createZip()
+//     websiteStatus = '{}'
+//     fs.writeFileSync('websiteStatus.json', websiteStatus);
+//     console.log("websiteStatus.json cleared");
+//    },1000*10)
 
 
 
@@ -177,18 +202,20 @@ setInterval( async ()=>{
 //     process.exit()
    
 // }) 
-process.on('SIGINT',()=>{
-    fs.writeFileSync('websiteStatus.json', websiteStatus)
-    process.exit()
-})
 
 
 function verifyUser(req, res, next) {
     const bearerHeader = req.headers['authorization'];
     if (typeof bearerHeader !== 'undefined') {
         const bearerToken = bearerHeader.split(' ');
-        const bearer = bearerToken[1];
-        req.token = bearer;
+        const token = bearerToken[1];
+        if (token){
+            const user = jwt.verify(token, process.env.JWT_SECRET)
+            req.user = user
+        }
+        else{
+            return res.sendStatus(403)
+        }
         next();
     } else {
         res.sendStatus(403);
@@ -199,41 +226,52 @@ app.get('/', (req, res) => {
     res.send('Welcome to the home page of Authentication System using JWT');
 });
 
-app.post('/register', (req, res) => {
-    const user = req.body;
-    if (fs.existsSync('users.json') === false)
-        fs.writeFileSync('users.json', JSON.stringify({}));
-    const userCredentials = fs.readFileSync('users.json', 'utf8');
-    let data = JSON.parse(userCredentials);
-    const accessToken = generateAccessToken(user);
-    if (data && typeof (data) === 'object') {
-        data[user.email] = user;
+app.post('/register', async(req, res) => {
+    const {username, email, password} = req.body;
+    const user = await userCollection.findOne({
+        $or:[{email},{username}]
+    })
+
+    if (user){
+        return res.status(409).json('User already exists')
     }
-    fs.writeFile('users.json', JSON.stringify(data), (err) => {
-        if (err) {
-            return res.status(500).json('Failed to register user');
-        }
-        res.json({
+    const accessToken = generateAccessToken(username, email);
+    const newUser = {
+        username:username,
+        email:email,
+        password:password,
+        websites:[]
+    }
+    await userCollection.insertOne(newUser)
+    res.json({
+            
             "message": "User registered successfully",
-            "token": accessToken
+            user:{
+                "username": username,
+                "email": email
+            },
+            "token": accessToken,
         });
-    });
 });
 
 
 
-app.post('/login', (req, res) => {
-    const user = req.body;
-    let userData = fs.readFileSync('users.json', 'utf8');
-    let data = JSON.parse(userData);
-    if (!data[user.email]) {
+app.post('/login', async(req, res) => {
+    const {username,email} = req.body;
+    
+    const userFound = await userCollection.findOne({
+        $or:[{email:email},{username:username}]
+    })
+
+    if (!userFound){
         return res.status(404).json('User not found');
     }
-    const accessToken = generateAccessToken(user);
+
+    const accessToken = generateAccessToken(username, email);
     try {
         res.json({
             "message": "Login successful",
-            "email": user.email,
+            "email": email,
             "token": accessToken
         });
     } catch (error) {
@@ -244,58 +282,54 @@ app.post('/login', (req, res) => {
 
 
 
-app.post('/check', verifyUser,(req, res) => {
-    jwt.verify(req.token, process.env.JWT_SECRET, (err, userData) => {
-        if (err) {
-            res.status(401).json('You are not authorized');
-        } else {
-                const { website } = req.body; // Extracting website from request body
-               
-                const userInfo = fs.readFileSync('users.json', 'utf8');
-                const data = JSON.parse(userInfo);
-                if (!data[userData.email].hasOwnProperty('websites')) {
-                    data[userData.email]['websites'] = [];
+app.post('/check', verifyUser, async(req, res) => {
+        const { website } = req.body; // Extracting website from request body
+        // fetching the website status        
+        const result = await checkWebsiteStatus(website);
+        
+        // store website to user collection
+        console.log(result)
+        const user = req.user.username
+        await userCollection.updateOne(
+            {username:user},
+            {   
+                $addToSet:{
+                   websites:{
+                    $each:[website]
+                   }
+                   
                 }
-
-                if (!data[userData.email]['websites'].includes(website)) {
-                    data[userData.email]['websites'].push(website);
-                    fs.writeFileSync('users.json', JSON.stringify(data));
-                }
-                
-                const result = checkWebsiteStatus(website);
-                if (result === undefined) {
-                    return res.status(500).json('Failed to check website status');
-                }
-                else{
-                res.json("Website status checked successfully .Check Status at endpoint /logs");
-                // res.end();
-                }
+            }
+        ) 
+                res.json({
+                    "status": result,
+                    "message": "Website status fetched successfully"
+                })
+            
  // Sending the status message to the client
-        }
-    })
+      
+   
 });
 
-app.get('/logs', verifyUser, (req, res) => {
-    jwt.verify(req.token, process.env.JWT_SECRET, (err, userData) => {
-        if (err) {
-            res.status(401).json('You are not authorized');
-        } else {
-            const readUser = fs.readFileSync('users.json', 'utf8');
-            const dataUser = JSON.parse(readUser);
-            //now fetch the websites from it
-            if (dataUser[userData.email]['websites'].length === 0) {
-                return res.status(404).json('No website to check');
-            }
-            const logs = []
-            for (const website of dataUser[userData.email]['websites']) {
-                const websiteStatus = fs.readFileSync('websiteStatus.json', 'utf8');
-                const data = JSON.parse(websiteStatus);
+app.get('/logs', verifyUser, async (req, res) => {
 
-                logs.push({
+    // Fetching user data 
+    const dataUser = await userCollection.findOne(req.user?._id)
+    //now fetch the websites from it
+    if (dataUser['websites'].length === 0) {
+            return res.status(404).json('No website to check');
+        }
+    
+    const logs = []
+    for (const website of dataUser['websites']) {
+        
+        const data = await websiteStatus.findOne({website})
+    
+        logs.push({
                     "website": website,
-                    "logs": data.hasOwnProperty(website)?data[website].slice(-1):"no logs found"
+                    "logs": data.hasOwnProperty("status")?data["status"].slice(-1):"no logs found"
                 })
-            }
+        }
             if (req.query.website){
                 res.json({
                     "recent logs":logs.filter(log=>log.website===req.query.website)
@@ -306,42 +340,45 @@ app.get('/logs', verifyUser, (req, res) => {
 
                 "recent logs": logs
             });
+            
         }
 
 
 
-
-        }
-    });
+      
 });
 
 
-app.get('/downloadzip',(req,res)=>{
+app.get('/downloadzip',verifyUser, async(req,res)=>{
 //     jwt.verify(req.token, process.env.JWT_SECRET, (err, userData) => {
         // if (err) {
             // res.status(401).json('You are not authorized');
         // } else {
-            if(req.query.zipfile && fs.existsSync(path.join(baseDir,req.query.zipfile))){
+            const user = await userCollection.findOne(req.user.username)
+            
+            if(req.query.zipfile && req.query.zipfile in user.website){
                 // res.download(baseDir+req.query.zipfile)
                 // res.setHeader(
                 //     'Content-Disposition', `attachment; filename=${req.query.zipfile}`);
-                res.download(`${path.join(baseDir,req.query.zipfile)}`,'LogZip.zip');
+                const requestedWebsiteLogs = await websiteStatus.findOne(req.query.zipfile)
+                const zippedFile = await createZip(requestedWebsiteLogs)
+                res.download(`${zippedFile}`,'LogZip.zip');
                 
                
             }
-            else if(!req.query.zipfile){
-                fs.readdir(baseDir, (err, files) => {
-                    if (err) {
-                        return res.status(500).send('Error reading folder');
-                    }
+            // else if(!req.query.zipfile){
+            //     fs.readdir(baseDir, (err, files) => {
+            //         if (err) {
+            //             return res.status(500).send('Error reading folder');
+            //         }
             
-                    const downloadLinks = files.map(file => {
-                        return `${req.protocol}://${req.get('host')}/logs/${encodeURIComponent(file)}`;
-                    });
+            //         const downloadLinks = files.map(file => {
+            //             return `${req.protocol}://${req.get('host')}/logs/${encodeURIComponent(file)}`;
+            //         });
             
-                    res.json(downloadLinks);
-                });
-            }
+            //         res.json(downloadLinks);
+            //     });
+            // }
             else{
                 res.status(404).json('File not found')
             }
@@ -358,6 +395,12 @@ app.get('/downloadzip',(req,res)=>{
 
 
 const PORT = process.env.PORT || 3000; // Setting default port to 3000 if not provided in .env
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+
+DB_CONNECTION()
+.then(()=>
+    app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+    }))
+.catch((err)=>{
+    console.log("MONGODB connection failed!", err)
+})
