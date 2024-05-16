@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 import fetch from 'node-fetch';
 import zlib from 'zlib';
 import path, { basename } from 'path';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 dotenv.config({ path: './.env' });
 
 const app = express();
@@ -46,7 +46,7 @@ function generateAccessToken(username, email) {
 
 
 
-async function checkWebsiteStatus(website){
+async function checkWebsiteStatus(website,userId){
     let user;
     await fetch(website,{method:'HEAD'})// Using fetch with the provided website URL
         .then(response => {
@@ -66,22 +66,12 @@ async function checkWebsiteStatus(website){
             }
         })
         .then(async (status)=>{  
-            if(!await websiteStatus.findOne({website})){
+            if(!await websiteStatus.findOne({userId:userId,website:website})){
                  user = await websiteStatus.insertOne({
+                        userId:userId,
                         website:website,
-                        status:[status]
-                    })
-                
-            }
-            else{
-                 user = await websiteStatus.findOneAndUpdate(
-                    {website},{
-                        $push:{
-                            status:status
-                        }
-                    }
-                )
-                
+                        status:status
+                    })   
             }
             
         
@@ -94,68 +84,56 @@ async function checkWebsiteStatus(website){
 
     }
 
-let websiteLogs = {}
+let websiteLogs = []
 // console.log(websiteStatus.deleteMany({document:null}))
 // let  userSearchedWebsites =  await websiteStatus.find()
 
 setInterval(async()=>{
-    console.log("checking website")
-    await websiteStatus.find().forEach((websiteData)=>{
-        // console.log(websiteData)
-        fetch(websiteData['website'])
-        .then((response)=>{
-            let result = {}
-            if (response.status === 200) {
-                result = {
-                    "status": "UP",
-                    "time": new Date().toLocaleString()
-                }
-            }
-            else{
-                result = {
-                    "status": "DOWN",
-                    "time": new Date().toLocaleString()
-                }
-            }    
-            
-            return result
-           
-        })
-        .then((status)=>{
-            // console.log("STATUS:", status)
-            if (!websiteLogs[websiteData['website']]){
-                websiteLogs[websiteData['website']]=[status]
-            }
-            websiteLogs[websiteData['website']].push(status)
-            
-            // console.log("WEBSITELOGS : ", websiteLogs)
-           
-        })
-        .catch((err)=>console.log(err))
-        
-    })
-},1000*5)
-
-setInterval(async()=>{
-
-    for (const website in websiteLogs){
-        const logs = websiteLogs[website]
-              
-        await websiteStatus.findOneAndUpdate(
-            {website},
-            {
-                $push:{
-                    status:{
-                        $each:logs
+        console.log("checking website")
+        await websiteStatus.find().forEach((websiteData)=>{
+            // console.log(websiteData)
+            fetch(websiteData['website'])
+            .then((response)=>{
+                let result = {}
+                if (response.status === 200) {
+                    result = {
+                        "status": "UP",
+                        "time": new Date().toLocaleString()
                     }
                 }
-            }
-        )
-    }
+                else{
+                    result = {
+                        "status": "DOWN",
+                        "time": new Date().toLocaleString()
+                    }
+                }    
+                
+               const log = {
+                userId:websiteData['userId'],
+                website:websiteData['website'],
+                status:result
+               }
+               websiteLogs.push(log)
     
-    
-    
-},1000*10)
+               
+            })
+            .catch((err)=>console.log(err))
+            
+        })
+    },1000*5)
+
+
+
+if(websiteLogs.length!==0){
+    setInterval(async()=>{
+            await websiteStatus.insertMany(
+                websiteLogs
+            )
+        websiteLogs = [] 
+        
+    },1000*10)
+}
+
 
 
 
@@ -189,19 +167,6 @@ async function createZip(logs){
 //     console.log("websiteStatus.json cleared");
 //    },1000*10)
 
-
-
-// process.on('uncaughtException',(err,origin)=>{
-//     fs.writeSync(
-//         process.stderr.fd,
-//         `Caught exception: ${err}\n` +
-//         `Exception origin: ${origin}\n`,
-//       );
-   
-//             fs.writeFileSync('websiteStatus.json', websiteStatus)
-//     process.exit()
-   
-// }) 
 
 
 function verifyUser(req, res, next) {
@@ -285,13 +250,15 @@ app.post('/login', async(req, res) => {
 app.post('/check', verifyUser, async(req, res) => {
         const { website } = req.body; // Extracting website from request body
         // fetching the website status        
-        const result = await checkWebsiteStatus(website);
+        const username = req.user.username
+        const userId = await userCollection.findOne({username})
+        const result = await checkWebsiteStatus(website, userId?._id);
         
         // store website to user collection
         console.log(result)
-        const user = req.user.username
+        
         await userCollection.updateOne(
-            {username:user},
+            {userId},
             {   
                 $addToSet:{
                    websites:{
