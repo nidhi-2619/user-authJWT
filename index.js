@@ -136,12 +136,8 @@ if(websiteLogs.length!==0){
 
 
 
+let baseDir = path.join('home/app','ZippedLogs')
 
-let baseDir = path.join('/home/user/Desktop/httpserver/ZippedLogs')
-
-if (!fs.existsSync(baseDir)){
-        fs.mkdirSync(baseDir)
-    }
 
 async function createZip(logs){
     return new Promise(async (resolve, reject) => {
