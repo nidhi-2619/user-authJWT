@@ -7,7 +7,6 @@ import zlib from 'zlib';
 import path, { basename } from 'path';
 import { MongoClient, ObjectId } from 'mongodb';
 dotenv.config({ path: './.env' });
-
 const app = express();
 app.use(express.json());
 app.use(express.static('ZippedLogs'))
@@ -47,7 +46,6 @@ function generateAccessToken(username, email) {
 
 
 async function checkWebsiteStatus(website,userId){
-    let user;
     await fetch(website,{method:'HEAD'})// Using fetch with the provided website URL
         .then(response => {
             if (response.status === 200) {
@@ -66,13 +64,12 @@ async function checkWebsiteStatus(website,userId){
             }
         })
         .then(async (status)=>{  
-            if(!await websiteStatus.findOne({userId:userId,website:website})){
-                 user = await websiteStatus.insertOne({
+            await websiteStatus.insertOne({
                         userId:userId,
                         website:website,
                         status:status
                     })   
-            }
+            
             
         
 })
@@ -80,15 +77,17 @@ async function checkWebsiteStatus(website,userId){
     
     
     const log = await websiteStatus.findOne({website})
+   
     return log
 
     }
 
-let websiteLogs = []
+
 // console.log(websiteStatus.deleteMany({document:null}))
 // let  userSearchedWebsites =  await websiteStatus.find()
-
+let websiteLogs = []
 setInterval(async()=>{
+        
         console.log("checking website")
         await websiteStatus.find().forEach((websiteData)=>{
             // console.log(websiteData)
@@ -206,6 +205,7 @@ app.post('/register', async(req, res) => {
     await userCollection.insertOne(newUser)
     res.json({
             
+
             "message": "User registered successfully",
             user:{
                 "username": username,
@@ -245,32 +245,28 @@ app.post('/login', async(req, res) => {
 
 app.post('/check', verifyUser, async(req, res) => {
         const { website } = req.body; // Extracting website from request body
-        // fetching the website status        
+        // fetching the website status
+           
         const username = req.user.username
-        const userId = await userCollection.findOne({username})
-        const result = await checkWebsiteStatus(website, userId?._id);
+        const user = await userCollection.findOne({username})
+        const result = await checkWebsiteStatus(website, user?._id);
         
-        // store website to user collection
-        console.log(result)
         
         await userCollection.updateOne(
-            {userId},
+            {username},
             {   
                 $addToSet:{
-                   websites:{
-                    $each:[website]
+                   websites:website
                    }
                    
                 }
-            }
         ) 
-                res.json({
-                    "status": result,
-                    "message": "Website status fetched successfully"
-                })
             
- // Sending the status message to the client
-      
+        res.json({
+            "status": result,
+            "message": "Website status fetched successfully",
+            
+        })
    
 });
 
